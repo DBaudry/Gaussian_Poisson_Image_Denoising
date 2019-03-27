@@ -47,17 +47,17 @@ def mixture_noise(im, alpha, c, sig):
     return noisy_im
 
 
-def gaussian_noise(im, sig):
+def gaussian_noise(im, alpha, c, sig):
     """
     :param im: Input image
     :param sig: Standard Deviation of the noise
     :return:
     """
     n = np.random.normal(size=im.shape)
-    return im+np.sqrt(im+sig**2)*n
+    return alpha * im + c + np.sqrt(alpha**2 * im + sig**2) * n
 
 
-def plot_dist_noise(u, n_test, sig):
+def plot_dist_noise(u, n_test, alpha, c, sig):
     """
     :param u: Real number in (1, 255) (luminence)
     :param n_test: number of samples
@@ -65,8 +65,8 @@ def plot_dist_noise(u, n_test, sig):
     :return: Plot Comparison between Gaussian and Gaussian/Poisson noise distribution for a given luminence
     """
     plt.figure()
-    test_noise = np.random.poisson(u, size=n_test) + sig * np.random.normal(size=n_test)
-    test_noise_g = u + np.sqrt(u+sig**2) * np.random.normal(size=n_test)
+    test_noise = alpha * np.random.poisson(u, size=n_test) + c + sig * np.random.normal(size=n_test)
+    test_noise_g = alpha * u + c + np.sqrt(alpha**2*u+sig**2) * np.random.normal(size=n_test)
     seaborn.distplot(test_noise)
     seaborn.distplot(test_noise_g)
     print('Expectation/Variance of Mixed Noise %f, %f' % (test_noise.mean(), test_noise.std()**2))
@@ -86,7 +86,7 @@ def load_generate_noise(name, alpha, c, sigma, display=False):
     if len(im_clean.shape) == 3:
         im_clean = im_clean[:, :, 0]
     im_noisy = mixture_noise(im_clean, alpha, c, sigma)
-    im_noisy_gaussian = gaussian_noise(im_clean, sigma)
+    im_noisy_gaussian = gaussian_noise(im_clean, alpha, c, sigma)
     if display:
         psnr_m, psnr_g = PSNR(im_noisy, im_clean), PSNR(im_noisy_gaussian, im_clean)
         captions_0 = ['Clean', 'Mixture - PSNR {}'.format(psnr_m), 'Gaussian - PSNR {}'.format(psnr_g)]
@@ -97,17 +97,22 @@ def load_generate_noise(name, alpha, c, sigma, display=False):
 # Tests with the DnCNN: raw input and transformed input
 
 
-def test_raw_dncnn(sigma, im_list, display=False):
+def test_raw_dncnn(alpha, c, sigma, im_list, display=False):
     """
     :param sigma: Standard deviation of the GP Mixture noise
     :param im_list: list of 3 images: input, GP mixture noise, Gaussian Noise
     :param display: Bool, Display or not the results
     :return: Output of DnCNN for the GP mixture and the Gaussian Noise
     """
-    sig = np.sqrt(sigma**2 + im_list[1].mean())
+    im = (copy(im_list[1]) - c)/alpha
+    img = (copy(im_list[2]) - c)/alpha
+    sig = np.sqrt(sigma**2/alpha**2 + im.mean())
+    sig_g = np.sqrt(sigma**2/alpha**2 + img.mean())
+    # sig = np.sqrt(sigma**2 + alpha**2 * im_list[1].mean())
     dncnn = DnCNN_pretrained_grayscale(sig)
-    out = test_denoiser(dncnn, im_list[1], None, has_noise=True)[0]
-    out_gaussian = test_denoiser(dncnn, im_list[2], None, has_noise=True)[0]
+    dncnn_g = DnCNN_pretrained_grayscale(sig_g)
+    out = test_denoiser(dncnn, im, None, has_noise=True)[0]
+    out_gaussian = test_denoiser(dncnn_g, img, None, has_noise=True)[0]
     if display:
         outputs = list()
         outputs.append((im_list[1], 'noisy input mixture with sigma = %f' % sigma))
@@ -130,42 +135,46 @@ def denoise_transform(im, denoiser, transform, inv_transform, param_transform):
     """
     out = transform(im, **param_transform)
     param_inv = copy(param_transform)
-    param_inv['std'] = out[1]
-    out = test_denoiser(denoiser(out[1]), out[0], None, has_noise=True)[0]
+    param_inv['param'] = (out[1], out[2])
+    noise_lvl = 255/(out[2] - out[1])/2
+    out = test_denoiser(denoiser(noise_lvl), out[0], None, has_noise=True)[0]
     return inv_transform(out, **param_inv)
 
 
-def VST_Gaussian(im, sigma):
+def VST_Gaussian(im, alpha, c, sigma):
     """
     :param im: Input image
     :param sigma: Standard deviation of the Gaussian Noise
     :return: Anscombe transform of the input image, rescaled in (0, 255),
      and the corresponding standard deviation
     """
-    fu = 2 * np.sqrt(np.abs(im + sigma**2))
-    std = 255/2/(np.sqrt(255+sigma**2) - sigma)
-    return (fu - 2*sigma)*std, std
+    im2 = (copy(im) - c)/alpha
+    fu = np.sqrt(im2 + (sigma/alpha)**2)
+    a = np.sqrt(1 + (sigma/alpha)**2)
+    b = np.sqrt(255 + (sigma/alpha)**2)
+    return (fu - a)/(b-a)*255., a, b
 
 
-def inv_VST_Gaussian(im, sigma, std):
+def inv_VST_Gaussian(im, alpha, c, sigma, param):
     """
     :param im: Output image of a VST
     :param sigma: Standard deviation of the Gaussian Noise
     :param std: Standard deviation of the noise of the transformed image
     :return: Inverse VST Transform
     """
-    return (im/2/std + sigma)**2 - sigma**2
+    new_im = copy(im) * (param[1] - param[0])/255. + param[0]
+    return new_im**2 - (sigma/alpha) ** 2
 
 
-def test_VST(im, sigma):
+def test_VST(im, alpha, c, sigma):
     """
     :param im: Set of input images (clean, GP mixture Noise, Gaussian Noise)
     :param sigma: Standard deviation of the Noise
     :return: Display transformed images
     """
-    clean = VST_Gaussian(im[0], sigma)[0]
-    noisy_mixture, noise_lvl = VST_Gaussian(im[1], sigma)
-    noisy_gaussian = VST_Gaussian(im[2], sigma)[0]
+    clean = VST_Gaussian(im[0], alpha, c, sigma)[0]
+    noisy_mixture, a, b = VST_Gaussian(im[1], alpha, c, sigma)
+    noisy_gaussian = VST_Gaussian(im[2], alpha, c, sigma)[0]
     noise_m = np.abs(noisy_mixture-clean)*5
     noise_g = np.abs(noisy_gaussian-clean)*5
     vistools.display_gallery([im[0], noisy_mixture, noisy_gaussian])
@@ -173,23 +182,24 @@ def test_VST(im, sigma):
     vistools.display_gallery([noise_m, noise_g], captions_1)
 
 
-def test_VST_bijective(im, sigma):
+def test_VST_bijective(im, alpha, c, sigma):
     """
     :param im: Input image
     :param sigma: Noise of the transform
     :return: Max absolute difference between the image and its Transformed/Inv_transformed counterpart
     to verify that the VST is bijective (this function is just a test function)
     """
-    test = VST_Gaussian(im, sigma)
-    test2 = inv_VST_Gaussian(test[0], sigma, test[1])
-    return np.abs(test2-im).max()
+    im2 = (copy(im)-c)/alpha
+    test, a, b = VST_Gaussian(im, alpha, c, sigma)
+    test2 = inv_VST_Gaussian(test, alpha, c, sigma, param=(a, b))
+    return np.abs(test2-im2).max()
 
 
 def test_dncnn_algos(name, alpha, c, sigma, display=True):
     im = load_generate_noise(name, alpha, c, sigma, display=False)
-    dncnn_raw = test_raw_dncnn(sigma, im, display=False)
+    dncnn_raw = test_raw_dncnn(alpha, c, sigma, im, display=False)
     dncnn = DnCNN_pretrained_grayscale
-    param = {'sigma': sigma}
+    param = {'alpha': alpha, 'c': c, 'sigma': sigma}
     out = denoise_transform(im[1], dncnn, VST_Gaussian, inv_VST_Gaussian, param)
     out_g = denoise_transform(im[2], dncnn, VST_Gaussian, inv_VST_Gaussian, param)
     outputs = im + dncnn_raw + (out, out_g)
@@ -212,7 +222,7 @@ def logp_scipy(x, y, sigma, tol=1e-4):
     p = poisson(x)
     n = norm(y, sigma)
     max_range = np.sqrt(-2*sigma**2*np.log(tol))
-    k_range = np.arange(max(int(y-max_range), 0), min(int(y+max_range), 300))
+    k_range = np.arange(min(299, max(int(y-max_range), 0)), min(int(y+max_range), 300))
     prob_list = np.zeros(k_range.shape[0])
     for i, k in enumerate(k_range):
         prob_list[i] = p.logpmf(k) + n.logpdf(k)
@@ -230,13 +240,23 @@ def write_proba_grid(sigma):
     return res
 
 
-def read_proba_grid(sigma):
+def read_proba_grid(sigma, best_match=True):
     try:
         res = pickle.load(open('pickle/GP_mixture_probability_sigma_'+str(sigma)+'.pk', 'rb'))
         return res
     except:
-        print('There was no pre-computed probability grid for this value of %f' %sigma)
-        return write_proba_grid(sigma)
+        if not best_match:
+            print('There was no pre-computed probability grid for this value of %f' %sigma)
+            return write_proba_grid(sigma)
+        else:
+            available = np.array([15, 30, 45])
+            sig_ind = np.where((available - sigma) > 0)[0]
+            if sig_ind.shape[0] == 0:
+                sig = available[-1]
+            else:
+                sig = available[sig_ind[0]]
+                print('Downloaded model for sigma= %f instead of sigma=%f' % (sig, sigma))
+            return pickle.load(open('pickle/GP_mixture_probability_sigma_'+str(sig)+'.pk', 'rb'))
 
 
 def norm_L2(x):
@@ -266,9 +286,11 @@ def update_x(im, prob, rho, u, v):
     return new_x
 
 
-def ADMM(im, sigma, denoiser, l, param, tol, max_iter, im_clean):
+def ADMM(im, alpha, c, sigma, denoiser, l, param, tol, max_iter, im_clean):
     """
     :param im: Input Image
+    :param alpha: Underlying model scaling of poisson noise
+    :param c: Underlying model mean of the gaussian noise
     :param sigma: Underlying model noise
     :param denoiser: Denoising algorithm class used in test_denoiser, is instanced with a certain sigma
     at each iteration
@@ -283,8 +305,9 @@ def ADMM(im, sigma, denoiser, l, param, tol, max_iter, im_clean):
     rho, eta, gamma = param
     n_iter = 0
     # x = np.random.uniform(0, 255, size=im.shape)
+    im = (copy(im) - c)/alpha
     x = copy(im)
-    prob_array = read_proba_grid(sigma)
+    prob_array = read_proba_grid(int(sigma/alpha), best_match=True)
     v, u = copy(x), np.zeros(im.shape)
     pbar = tqdm(total=max_iter)
     out_x, out_v = [], []
@@ -307,3 +330,10 @@ def ADMM(im, sigma, denoiser, l, param, tol, max_iter, im_clean):
             PSNR_x.append(PSNR(x, im_clean))
             PSNR_v.append(PSNR(v, im_clean))
     return (x+v)/2, out_x, out_v, PSNR_x, PSNR_v
+
+
+if __name__ == '__main__':
+    alpha0, c0, sigma0 = 0.8, 0.2*125, 20
+    param = [5, 10, 20, 25, 40, 60]
+    for p in param:
+        write_proba_grid(p)
