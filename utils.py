@@ -1,4 +1,4 @@
-from tqdm import tqdm
+from tqdm import tqdm_notebook as tqdm
 import numpy as np
 import torch
 import torch.nn as nn
@@ -82,7 +82,7 @@ def load_generate_noise(name, alpha, c, sigma, display=False):
     :param display: Bool, display the generated images along with the input or not
     :return: 3 images: input, GP mixture noise and gaussian noise
     """
-    im_clean = io.imread(name, dtype='float32')
+    im_clean = io.imread(name, dtype='float32')[:500, :500]
     if len(im_clean.shape) == 3:
         im_clean = im_clean[:, :, 0]
     im_noisy = mixture_noise(im_clean, alpha, c, sigma)
@@ -212,7 +212,7 @@ def test_dncnn_algos(name, alpha, c, sigma, display=True):
                     'Gaussian Raw DnCNN - PSNR = %f' % PSNR_im[3], 'GP Mixture VST DnCNN - PSNR = %f' % PSNR_im[4],
                     'Gaussian VST DnCNN - PSNR = %f' % PSNR_im[5]]
         vistools.display_gallery(outputs, captions)
-    return outputs
+    return outputs, PSNR_im
 
 
 # ADMM
@@ -329,11 +329,32 @@ def ADMM(im, alpha, c, sigma, denoiser, l, param, tol, max_iter, im_clean):
         if im_clean is not None:
             PSNR_x.append(PSNR(x, im_clean))
             PSNR_v.append(PSNR(v, im_clean))
-    return (x+v)/2, out_x, out_v, PSNR_x, PSNR_v
+    return v, out_x, out_v, PSNR_x, PSNR_v
+
+
+def test_all_algos(name, alpha, c, sigma, param_ADMM, display=True, mixture_only=False):
+    out, PSNR_im = test_dncnn_algos(name, alpha, c, sigma, display=False)
+    param_ADMM['im_clean'] = out[0]
+    res_ADMM = ADMM(out[1], alpha, c, sigma, **param_ADMM)
+    out = list(out)
+    out.append(res_ADMM[0])
+    PSNR_im.append(res_ADMM[-1][-1])
+    if display:
+        captions = ['Clean Image', 'GP Mixture Noise - PSNR = %f' % PSNR_im[0],
+                  'Gaussian Noise - PSNR = %f' % PSNR_im[1], 'GP Mixture Raw DnCNN - PSNR = %f' % PSNR_im[2],
+                  'Gaussian Raw DnCNN - PSNR = %f' % PSNR_im[3], 'GP Mixture VST DnCNN - PSNR = %f' % PSNR_im[4],
+                  'Gaussian VST DnCNN - PSNR = %f' % PSNR_im[5], 'ADMM Mixture - PSNR = %f' % PSNR_im[6]]
+        if not mixture_only:
+            vistools.display_gallery(out, captions)
+        else:
+            ind = [0, 1, 3, 5, 7]
+            vistools.display_gallery([out[i] for i in ind], [captions[i] for i in ind])
+    return out, PSNR_im
 
 
 if __name__ == '__main__':
-    alpha0, c0, sigma0 = 0.8, 0.2*125, 20
-    param = [5, 10, 20, 25, 40, 60]
-    for p in param:
-        write_proba_grid(p)
+    name = 'images/test010.jpg'
+    alpha, c, sigma = 0.8, 0., 20
+    param_ADMM = {'denoiser': DnCNN_pretrained_grayscale, 'l': 1.,
+                'param': (1e-3, 0.85, 1.5), 'tol': 1e-3, 'max_iter': 3}
+    test_all_algos(name, alpha, c, sigma, param_ADMM, display=True)
